@@ -52,69 +52,90 @@ const DATING_STIMULI = [
 
 const AnalysisInterface: React.FC<AnalysisInterfaceProps> = ({ isConnected }) => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [analysisType, setAnalysisType] = useState<'personality' | 'dating' | null>(null);
+  const [analysisStep, setAnalysisStep] = useState<string>('');
   const [personalityResult, setPersonalityResult] = useState<PersonalityResult | null>(null);
   const [datingResults, setDatingResults] = useState<DatingPreference[]>([]);
   const [currentStimulusIndex, setCurrentStimulusIndex] = useState(0);
   const [showingStimulus, setShowingStimulus] = useState(false);
+  const [analysisComplete, setAnalysisComplete] = useState(false);
 
-  const startPersonalityAnalysis = async () => {
+  const sendResultsToScanner = async (personalityData: PersonalityResult, datingData: DatingPreference[]) => {
+    try {
+      // Send results to scanner frontend via booth backend
+      const response = await fetch('http://localhost:5000/send-analysis-results', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          type: 'eeg_analysis_complete',
+          personality: personalityData,
+          dating_preferences: datingData,
+          timestamp: new Date().toISOString()
+        }),
+      });
+
+      if (response.ok) {
+        console.log('✅ Results sent to scanner successfully');
+      } else {
+        console.error('❌ Failed to send results to scanner');
+      }
+    } catch (error) {
+      console.error('Error sending results to scanner:', error);
+    }
+  };
+
+  const startComprehensiveAnalysis = async () => {
     if (!isConnected) {
       alert('Please connect to EEG first');
       return;
     }
 
     setIsAnalyzing(true);
-    setAnalysisType('personality');
+    setAnalysisComplete(false);
     setPersonalityResult(null);
+    setDatingResults([]);
 
     try {
+      // Step 1: Personality Analysis
+      setAnalysisStep('Analyzing personality traits...');
+      
       // Show countdown
       for (let i = 3; i > 0; i--) {
+        setAnalysisStep(`Starting analysis in ${i}...`);
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
 
-      // Call backend API
-      const response = await fetch('http://localhost:3004/analyze-personality', {
+      setAnalysisStep('Recording baseline EEG activity...');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      // Call personality analysis API
+      const personalityResponse = await fetch('http://localhost:5000/analyze-personality', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
       });
 
-      const data = await response.json();
+      const personalityData = await personalityResponse.json();
       
-      if (data.status === 'success') {
-        setPersonalityResult(data.personality);
+      if (personalityData.status === 'success') {
+        setPersonalityResult(personalityData.personality);
+        setAnalysisStep('Personality analysis complete! Starting preference testing...');
       } else {
-        alert(data.error || 'Analysis failed');
+        throw new Error(personalityData.error || 'Personality analysis failed');
       }
-    } catch (error) {
-      console.error('Personality analysis error:', error);
-      alert('Analysis failed. Please try again.');
-    } finally {
-      setIsAnalyzing(false);
-      setAnalysisType(null);
-    }
-  };
 
-  const startDatingAnalysis = async () => {
-    if (!isConnected) {
-      alert('Please connect to EEG first');
-      return;
-    }
+      await new Promise(resolve => setTimeout(resolve, 2000));
 
-    setIsAnalyzing(true);
-    setAnalysisType('dating');
-    setDatingResults([]);
-    setCurrentStimulusIndex(0);
-
-    try {
+      // Step 2: Dating Preferences Analysis
+      setAnalysisStep('Testing dating preferences...');
       const results: DatingPreference[] = [];
 
       for (let i = 0; i < DATING_STIMULI.length; i++) {
         const stimulus = DATING_STIMULI[i];
         setCurrentStimulusIndex(i);
+        setAnalysisStep(`Testing preference ${i + 1} of ${DATING_STIMULI.length}...`);
         setShowingStimulus(true);
 
         // Show stimulus for 3 seconds
@@ -123,7 +144,7 @@ const AnalysisInterface: React.FC<AnalysisInterfaceProps> = ({ isConnected }) =>
         setShowingStimulus(false);
 
         // Analyze EEG response
-        const response = await fetch('http://localhost:3004/analyze-dating-preference', {
+        const response = await fetch('http://localhost:5000/analyze-dating-preference', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -145,12 +166,20 @@ const AnalysisInterface: React.FC<AnalysisInterfaceProps> = ({ isConnected }) =>
       }
 
       setDatingResults(results);
+      setAnalysisStep('Analysis complete! Sending results...');
+      
+      // Step 3: Send results to scanner
+      await sendResultsToScanner(personalityData.personality, results);
+      
+      setAnalysisComplete(true);
+      setAnalysisStep('Results sent to scanner successfully!');
+      
     } catch (error) {
-      console.error('Dating analysis error:', error);
+      console.error('Comprehensive analysis error:', error);
       alert('Analysis failed. Please try again.');
+      setAnalysisStep('Analysis failed');
     } finally {
       setIsAnalyzing(false);
-      setAnalysisType(null);
       setShowingStimulus(false);
     }
   };
@@ -257,31 +286,33 @@ const AnalysisInterface: React.FC<AnalysisInterfaceProps> = ({ isConnected }) =>
 
       <div className="analysis-controls">
         <button 
-          className="analysis-btn personality-btn"
-          onClick={startPersonalityAnalysis}
+          className="analysis-btn comprehensive-btn"
+          onClick={startComprehensiveAnalysis}
           disabled={!isConnected || isAnalyzing}
         >
-          {isAnalyzing && analysisType === 'personality' ? 'Analyzing...' : '🧠 Analyze Personality'}
+          {isAnalyzing ? 'Analyzing...' : '🧠 Start EEG Analysis'}
         </button>
         
-        <button 
-          className="analysis-btn dating-btn"
-          onClick={startDatingAnalysis}
-          disabled={!isConnected || isAnalyzing}
-        >
-          {isAnalyzing && analysisType === 'dating' ? 'Testing Preferences...' : '💕 Dating Preferences'}
-        </button>
+        {analysisComplete && (
+          <div className="analysis-complete">
+            <div className="success-icon">✅</div>
+            <p>Analysis complete! Results sent to scanner.</p>
+          </div>
+        )}
       </div>
 
       {isAnalyzing && (
         <div className="analysis-progress">
           <div className="progress-spinner"></div>
-          <p>
-            {analysisType === 'personality' 
-              ? 'Analyzing your personality patterns...' 
-              : `Testing preference ${currentStimulusIndex + 1} of ${DATING_STIMULI.length}...`
-            }
-          </p>
+          <p>{analysisStep}</p>
+          {showingStimulus && (
+            <div className="progress-bar">
+              <div 
+                className="progress-fill"
+                style={{ width: `${((currentStimulusIndex + 1) / DATING_STIMULI.length) * 100}%` }}
+              />
+            </div>
+          )}
         </div>
       )}
 

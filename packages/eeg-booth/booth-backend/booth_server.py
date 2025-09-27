@@ -158,6 +158,49 @@ class BoothBackend:
                 logger.error(f"❌ Dating preference analysis error: {e}")
                 return jsonify({'error': f'Analysis failed: {str(e)}'}), 500
         
+        @self.app.route('/send-analysis-results', methods=['POST'])
+        def send_analysis_results():
+            """Send complete EEG analysis results to scanner frontend"""
+            try:
+                data = request.get_json()
+                
+                # Create comprehensive results message
+                results_message = {
+                    'type': 'eeg_analysis_complete',
+                    'booth_id': self.booth_id,
+                    'personality': data.get('personality'),
+                    'dating_preferences': data.get('dating_preferences'),
+                    'timestamp': data.get('timestamp'),
+                    'summary': self._generate_analysis_summary(data.get('personality'), data.get('dating_preferences'))
+                }
+                
+                logger.info("📊 Sending comprehensive EEG analysis results to scanner...")
+                
+                # Send to all connected scanner clients via WebSocket
+                if self.scanner_clients:
+                    disconnected = []
+                    for client in self.scanner_clients:
+                        try:
+                            asyncio.create_task(client.send(json.dumps(results_message)))
+                            logger.info("✅ Results sent to scanner client")
+                        except Exception as e:
+                            logger.error(f"Failed to send to scanner client: {e}")
+                            disconnected.append(client)
+                    
+                    # Remove disconnected clients
+                    for client in disconnected:
+                        self.scanner_clients.discard(client)
+                
+                return jsonify({
+                    'status': 'success',
+                    'message': 'Results sent to scanner',
+                    'scanner_clients': len(self.scanner_clients)
+                })
+                
+            except Exception as e:
+                logger.error(f"❌ Error sending results to scanner: {e}")
+                return jsonify({'error': f'Failed to send results: {str(e)}'}), 500
+        
         @self.app.route('/eeg-status', methods=['GET'])
         def get_eeg_status():
             return jsonify({
@@ -582,6 +625,59 @@ class BoothBackend:
         flask_thread.start()
         logger.info(f"Flask server started on port {self.frontend_port}")
     
+    def _generate_analysis_summary(self, personality, dating_preferences):
+        """Generate a human-readable summary of the EEG analysis"""
+        if not personality or not dating_preferences:
+            return "Incomplete analysis data"
+        
+        # Find dominant personality traits (>70%)
+        dominant_traits = []
+        for trait, score in personality.get('scores', {}).items():
+            if score >= 70:
+                dominant_traits.append(trait.capitalize())
+        
+        # Find top dating preferences
+        sorted_prefs = sorted(dating_preferences, key=lambda x: x.get('attraction_score', 0), reverse=True)
+        top_preferences = []
+        
+        for pref in sorted_prefs[:3]:  # Top 3 preferences
+            if pref.get('attraction_score', 0) >= 60:
+                top_preferences.append({
+                    'type': pref.get('stimulus_type', '').replace('_', ' ').title(),
+                    'score': pref.get('attraction_score', 0),
+                    'level': pref.get('attraction_level', '')
+                })
+        
+        summary = {
+            'personality_highlights': dominant_traits if dominant_traits else ['Balanced personality'],
+            'top_preferences': top_preferences,
+            'analysis_confidence': personality.get('confidence', 0),
+            'total_preferences_tested': len(dating_preferences),
+            'interpretation': self._generate_interpretation(personality, top_preferences)
+        }
+        
+        return summary
+    
+    def _generate_interpretation(self, personality, top_preferences):
+        """Generate personality-based interpretation"""
+        scores = personality.get('scores', {})
+        
+        # Generate interpretation based on personality
+        interpretation = []
+        
+        if scores.get('extraversion', 50) >= 70:
+            interpretation.append("Shows strong social engagement patterns")
+        elif scores.get('extraversion', 50) <= 30:
+            interpretation.append("Prefers deeper, meaningful connections")
+        
+        if scores.get('openness', 50) >= 70:
+            interpretation.append("Values creativity and novel experiences")
+        
+        if top_preferences:
+            interpretation.append(f"Shows clear attraction preferences with {top_preferences[0]['level'].lower()}")
+        
+        return ' • '.join(interpretation) if interpretation else "Balanced neural response patterns detected"
+
     async def run(self):
         """Main run method"""
         logger.info(f"Starting Booth Backend with ID: {self.booth_id}")
