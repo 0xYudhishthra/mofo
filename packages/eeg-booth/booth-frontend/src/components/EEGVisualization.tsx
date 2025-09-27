@@ -17,6 +17,13 @@ interface EEGData {
   packet_num: number;
   channels: number[];
   status: string;
+  frequency_bands?: {
+    delta: number;
+    theta: number;
+    alpha: number;
+    beta: number;
+    gamma: number;
+  } | null;
 }
 
 interface EEGVisualizationProps {
@@ -45,6 +52,13 @@ const EEGVisualization: React.FC<EEGVisualizationProps> = ({ websocket, isConnec
   const [timeWindow] = useState(5); // 5 seconds of data
   const [samplingRate] = useState(250); // 250 Hz
   const maxDataPoints = timeWindow * samplingRate; // 1250 points
+  const [frequencyBands, setFrequencyBands] = useState<{
+    delta: number;
+    theta: number;
+    alpha: number;
+    beta: number;
+    gamma: number;
+  } | null>(null);
 
   // Initialize channels
   useEffect(() => {
@@ -71,6 +85,11 @@ const EEGVisualization: React.FC<EEGVisualizationProps> = ({ websocket, isConnec
         if (data.type === 'eeg' && data.channels && data.channels.length === 8) {
           setIsStreaming(true);
           setPacketCount(data.packet_num);
+          
+          // Update frequency bands if available
+          if (data.frequency_bands) {
+            setFrequencyBands(data.frequency_bands);
+          }
           
           setChannels(prevChannels => {
             return prevChannels.map((channel, index) => {
@@ -144,27 +163,73 @@ const EEGVisualization: React.FC<EEGVisualizationProps> = ({ websocket, isConnec
         ctx.stroke();
       }
       
+      // Draw channel labels and voltage markers (OpenBCI style)
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = '12px Arial';
+      channels.forEach((channel, channelIndex) => {
+        const centerY = channelIndex * channelHeight + channelHeight / 2;
+        
+        // Channel number circle (like OpenBCI)
+        ctx.fillStyle = channel.color;
+        ctx.beginPath();
+        ctx.arc(25, centerY, 12, 0, 2 * Math.PI);
+        ctx.fill();
+        
+        // Channel number text
+        ctx.fillStyle = '#FFFFFF';
+        ctx.textAlign = 'center';
+        ctx.fillText(channel.name, 25, centerY + 4);
+        
+        // Voltage range indicators (+50µV, -50µV)
+        ctx.fillStyle = '#999999';
+        ctx.textAlign = 'left';
+        ctx.font = '10px Arial';
+        const topY = channelIndex * channelHeight + channelHeight * 0.1;
+        const bottomY = channelIndex * channelHeight + channelHeight * 0.9;
+        ctx.fillText('+50uV', width - 60, topY);
+        ctx.fillText('-50uV', width - 60, bottomY);
+        
+        // Current voltage value and RMS (right side)
+        ctx.fillStyle = channel.notRailed ? '#00FF00' : '#FF0000';
+        ctx.textAlign = 'right';
+        ctx.font = '10px Arial';
+        const statusText = channel.notRailed ? `Not Railed ${(channel.rmsValue || 0).toFixed(2)} uVrms` : 'Railed';
+        ctx.fillText(statusText, width - 5, centerY + channelHeight * 0.3);
+      });
+      
       // Draw EEG traces
       channels.forEach((channel, channelIndex) => {
         const centerY = channelIndex * channelHeight + channelHeight / 2;
-        const scale = channelHeight / 400; // Scale for μV range
+        
+        // OpenBCI-style scaling: ±50µV fills about 80% of channel height
+        // This makes small signals much more visible
+        const voltageRange = 100; // ±50µV range (like OpenBCI)
+        const scale = (channelHeight * 0.8) / voltageRange;
         
         ctx.strokeStyle = channel.color;
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 1.2; // Slightly thinner for better visibility
         ctx.beginPath();
         
+        let hasValidPoint = false;
         channel.data.forEach((value, dataIndex) => {
-          const x = (dataIndex / channel.data.length) * width;
-          const y = centerY - (value * scale);
+          // Start drawing from x=50 to leave space for channel labels
+          const x = 50 + ((dataIndex / channel.data.length) * (width - 120));
+          
+          // Clamp values to prevent overflow (like OpenBCI does)
+          const clampedValue = Math.max(-50, Math.min(50, value));
+          const y = centerY - (clampedValue * scale);
           
           if (dataIndex === 0) {
             ctx.moveTo(x, y);
-          } else {
+            hasValidPoint = true;
+          } else if (hasValidPoint) {
             ctx.lineTo(x, y);
           }
         });
         
-        ctx.stroke();
+        if (hasValidPoint) {
+          ctx.stroke();
+        }
       });
     };
 
@@ -233,11 +298,76 @@ const EEGVisualization: React.FC<EEGVisualizationProps> = ({ websocket, isConnec
           ))}
         </div>
 
+        <div className="frequency-bands">
+          <div className="frequency-header">
+            <span>Frequency Bands</span>
+            <span className="frequency-subtitle">Real-time Analysis</span>
+          </div>
+          {frequencyBands ? (
+            <div className="bands-list">
+              <div className="band-item">
+                <div className="band-name">Delta (0.5-4 Hz)</div>
+                <div className="band-bar">
+                  <div 
+                    className="band-fill delta-band" 
+                    style={{ width: `${frequencyBands.delta}%` }}
+                  ></div>
+                </div>
+                <div className="band-value">{frequencyBands.delta.toFixed(1)}%</div>
+              </div>
+              <div className="band-item">
+                <div className="band-name">Theta (4-8 Hz)</div>
+                <div className="band-bar">
+                  <div 
+                    className="band-fill theta-band" 
+                    style={{ width: `${frequencyBands.theta}%` }}
+                  ></div>
+                </div>
+                <div className="band-value">{frequencyBands.theta.toFixed(1)}%</div>
+              </div>
+              <div className="band-item">
+                <div className="band-name">Alpha (8-13 Hz)</div>
+                <div className="band-bar">
+                  <div 
+                    className="band-fill alpha-band" 
+                    style={{ width: `${frequencyBands.alpha}%` }}
+                  ></div>
+                </div>
+                <div className="band-value">{frequencyBands.alpha.toFixed(1)}%</div>
+              </div>
+              <div className="band-item">
+                <div className="band-name">Beta (13-30 Hz)</div>
+                <div className="band-bar">
+                  <div 
+                    className="band-fill beta-band" 
+                    style={{ width: `${frequencyBands.beta}%` }}
+                  ></div>
+                </div>
+                <div className="band-value">{frequencyBands.beta.toFixed(1)}%</div>
+              </div>
+              <div className="band-item">
+                <div className="band-name">Gamma (30-45 Hz)</div>
+                <div className="band-bar">
+                  <div 
+                    className="band-fill gamma-band" 
+                    style={{ width: `${frequencyBands.gamma}%` }}
+                  ></div>
+                </div>
+                <div className="band-value">{frequencyBands.gamma.toFixed(1)}%</div>
+              </div>
+            </div>
+          ) : (
+            <div className="bands-loading">
+              <span>Calculating frequency bands...</span>
+            </div>
+          )}
+        </div>
+
         <div className="eeg-graph">
           <canvas 
             ref={canvasRef}
-            width={600}
-            height={420}
+            width={800}
+            height={500}
             className="eeg-canvas"
           />
           <div className="time-axis">

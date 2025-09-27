@@ -10,7 +10,7 @@ import serial
 import time
 import queue
 from datetime import datetime
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 try:
     import numpy as np
@@ -51,6 +51,10 @@ class BoothBackend:
             self.eeg_processor = EEGProcessor(sampling_rate=250)
         else:
             self.eeg_processor = None
+            
+        # Store recent EEG data for frequency analysis (2 seconds = 500 samples)
+        self.recent_channel_data = [[] for _ in range(8)]
+        self.max_recent_samples = 500
         
         # Flask app for serving frontend data
         self.app = Flask(__name__)
@@ -85,6 +89,74 @@ class BoothBackend:
         def send_message():
             # Future endpoint for sending messages to scanner
             return jsonify({'status': 'message_sent'})
+        
+        @self.app.route('/analyze-personality', methods=['POST'])
+        def analyze_personality():
+            """Analyze Big 5 personality traits from current EEG data"""
+            if not self.eeg_processor or not EEG_AVAILABLE:
+                return jsonify({'error': 'EEG processor not available'}), 400
+                
+            if not self.eeg_streaming or len(self.recent_channel_data[0]) < 500:
+                return jsonify({'error': 'Insufficient EEG data for analysis'}), 400
+            
+            try:
+                logger.info("🧠 Starting Big 5 personality analysis...")
+                
+                # Use recent EEG data for personality analysis
+                personality_result = self.eeg_processor.calculate_big5_personality(self.recent_channel_data)
+                
+                if personality_result:
+                    logger.info(f"✅ Personality analysis complete")
+                    return jsonify({
+                        'status': 'success',
+                        'analysis_type': 'big5_personality',
+                        'personality': personality_result,
+                        'timestamp': datetime.now().isoformat()
+                    })
+                else:
+                    return jsonify({'error': 'Personality analysis failed'}), 400
+                    
+            except Exception as e:
+                logger.error(f"❌ Personality analysis error: {e}")
+                return jsonify({'error': f'Analysis failed: {str(e)}'}), 500
+        
+        @self.app.route('/analyze-dating-preference', methods=['POST'])
+        def analyze_dating_preference():
+            """Analyze dating preference based on EEG response to stimulus"""
+            if not self.eeg_processor or not EEG_AVAILABLE:
+                return jsonify({'error': 'EEG processor not available'}), 400
+                
+            if not self.eeg_streaming or len(self.recent_channel_data[0]) < 250:
+                return jsonify({'error': 'Insufficient EEG data for analysis'}), 400
+            
+            try:
+                data = request.get_json()
+                stimulus_type = data.get('stimulus_type', 'unknown')
+                stimulus_duration = data.get('duration', 3)
+                
+                logger.info(f"💕 Analyzing dating preference for stimulus: {stimulus_type}")
+                
+                # Analyze EEG response to the stimulus
+                preference_result = self.eeg_processor.analyze_dating_preference(
+                    self.recent_channel_data, 
+                    stimulus_type, 
+                    stimulus_duration
+                )
+                
+                if preference_result:
+                    logger.info(f"✅ Dating preference analysis complete: {preference_result['attraction_level']}")
+                    return jsonify({
+                        'status': 'success',
+                        'analysis_type': 'dating_preference',
+                        'preference': preference_result,
+                        'timestamp': datetime.now().isoformat()
+                    })
+                else:
+                    return jsonify({'error': 'Dating preference analysis failed'}), 400
+                    
+            except Exception as e:
+                logger.error(f"❌ Dating preference analysis error: {e}")
+                return jsonify({'error': f'Analysis failed: {str(e)}'}), 500
         
         @self.app.route('/eeg-status', methods=['GET'])
         def get_eeg_status():
@@ -147,13 +219,29 @@ class BoothBackend:
                                         val -= 0x1000000
                                     channels.append(round(val * self.openbci_scale, 2))
 
+                                # Store recent data for frequency analysis
+                                for i, channel_val in enumerate(channels):
+                                    self.recent_channel_data[i].append(channel_val)
+                                    # Keep only last 2 seconds of data
+                                    if len(self.recent_channel_data[i]) > self.max_recent_samples:
+                                        self.recent_channel_data[i] = self.recent_channel_data[i][-self.max_recent_samples:]
+
+                                # Calculate frequency bands every 25 packets (10Hz update rate)
+                                frequency_bands = None
+                                if packet_count % 25 == 0 and self.eeg_processor and EEG_AVAILABLE:
+                                    try:
+                                        frequency_bands = self.eeg_processor.calculate_realtime_frequency_bands(self.recent_channel_data)
+                                    except Exception as e:
+                                        logger.debug(f"Frequency analysis error: {e}")
+
                                 # Create EEG data message
                                 eeg_data = {
                                     'type': 'eeg',
                                     'timestamp': time.time(),
                                     'packet_num': packet_count,
                                     'channels': channels,
-                                    'status': 'streaming'
+                                    'status': 'streaming',
+                                    'frequency_bands': frequency_bands
                                 }
 
                                 # Queue for WebSocket broadcast

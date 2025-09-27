@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import QRCode from 'qrcode';
 import EEGVisualization from './components/EEGVisualization';
+import AnalysisInterface from './components/AnalysisInterface';
 import './App.css';
 
 interface BoothStatus {
@@ -232,7 +233,10 @@ function App() {
             </div>
             
             {eegConnected ? (
-              <EEGVisualization websocket={eegWebSocket} isConnected={eegConnected} />
+              <>
+                <EEGVisualization websocket={eegWebSocket} isConnected={eegConnected} />
+                <AnalysisInterface isConnected={eegConnected} />
+              </>
             ) : (
               <div className="eeg-connecting">
                 <div className="loading-spinner"></div>
