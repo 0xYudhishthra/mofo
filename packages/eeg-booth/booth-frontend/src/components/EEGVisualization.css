@@ -87,9 +87,11 @@
 }
 
 .channel-labels {
-  min-width: 220px;
+  min-width: 250px;
+  max-width: 280px;
   border-right: 1px solid #e2e8f0;
-  padding-right: 24px;
+  padding-right: 16px;
+  overflow: hidden;
 }
 
 .channels-header {
@@ -114,10 +116,11 @@
 .channel-info {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 0;
-  height: 40px;
+  gap: 12px;
+  padding: 8px 0;
+  height: 50px;
   border-bottom: 1px solid #f1f5f9;
+  position: relative;
 }
 
 .channel-number {
@@ -136,34 +139,46 @@
 
 .channel-stats {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex-direction: row;
+  align-items: center;
+  gap: 16px;
   flex: 1;
+  justify-content: space-between;
+  min-width: 0; /* Prevent flex item overflow */
 }
 
 .voltage-range {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 60px;
+  flex-shrink: 0;
 }
 
 .voltage-max, .voltage-min {
-  font-size: 11px;
+  font-size: 10px;
   font-family: 'SF Mono', 'Monaco', 'Menlo', monospace;
   color: #334155;
   font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .channel-status {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
+  min-width: 80px;
+  flex-shrink: 0;
+  text-align: right;
 }
 
 .rail-status {
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 600;
   text-transform: capitalize;
+  white-space: nowrap;
 }
 
 .rail-status.not-railed {
@@ -175,9 +190,10 @@
 }
 
 .rms-value {
-  font-size: 10px;
+  font-size: 9px;
   font-family: 'SF Mono', 'Monaco', 'Menlo', monospace;
   color: #64748b;
+  white-space: nowrap;
 }
 
 .eeg-graph {
@@ -384,7 +400,52 @@
   font-style: italic;
 }
 
-/* Desktop-optimized layout - no mobile responsive design needed */
+/* Responsive design for channel labels */
+@media (max-width: 1200px) {
+  .channel-labels {
+    min-width: 200px;
+    max-width: 220px;
+  }
+  
+  .channel-stats {
+    gap: 8px;
+  }
+  
+  .voltage-range {
+    min-width: 50px;
+  }
+  
+  .channel-status {
+    min-width: 65px;
+  }
+}
+
+@media (max-width: 900px) {
+  .eeg-content {
+    flex-direction: column;
+  }
+  
+  .channel-labels {
+    min-width: 100%;
+    max-width: 100%;
+    border-right: none;
+    border-bottom: 1px solid #e2e8f0;
+    padding-right: 0;
+    padding-bottom: 16px;
+    margin-bottom: 16px;
+  }
+  
+  .channel-info {
+    height: 45px;
+    padding: 6px 0;
+  }
+  
+  .channel-stats {
+    gap: 12px;
+  }
+}
+
+/* Desktop-optimized layout */
 @media (min-width: 1400px) {
   .eeg-content {
     gap: 40px;
@@ -392,7 +453,8 @@
   }
   
   .channel-labels {
-    min-width: 250px;
+    min-width: 280px;
+    max-width: 300px;
     padding-right: 32px;
   }
   

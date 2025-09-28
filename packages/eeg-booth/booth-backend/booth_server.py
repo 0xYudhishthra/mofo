@@ -6,7 +6,6 @@ import uuid
 import threading
 import ssl
 import os
-import serial
 import time
 import queue
 from datetime import datetime
@@ -14,10 +13,14 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 try:
     import numpy as np
+    from brainflow.board_shim import BoardShim, BrainFlowInputParams, BoardIds
+    from brainflow.data_filter import DataFilter, FilterTypes, AggOperations
     from eeg_processor import EEGProcessor
+    BRAINFLOW_AVAILABLE = True
     EEG_AVAILABLE = True
 except ImportError:
-    print("Warning: EEG processing not available. Install numpy and scipy for full functionality.")
+    print("Warning: BrainFlow not available. Install brainflow for OpenBCI support.")
+    BRAINFLOW_AVAILABLE = False
     EEG_AVAILABLE = False
 
 # Configure logging
@@ -38,13 +41,16 @@ class BoothBackend:
         self.eeg_clients = set()
         self.eeg_server_port = 3005
         
-        # OpenBCI hardware connection
-        self.openbci_port = "/dev/cu.usbserial-DM01MV82"
-        self.openbci_baudrate = 115200
-        self.openbci_scale = 0.02235 / 1000  # Correct scale for μV
-        self.eeg_serial = None
+        # BrainFlow OpenBCI connection
+        self.board_id = BoardIds.CYTON_BOARD.value  # OpenBCI Cyton 8-channel
+        self.board_shim = None
+        self.sampling_rate = 250  # OpenBCI Cyton sampling rate
         self.eeg_streaming = False
         self.eeg_data_queue = queue.Queue(maxsize=1000)
+        
+        # BrainFlow parameters
+        self.params = BrainFlowInputParams()
+        self.params.serial_port = "/dev/cu.usbserial-DM01MV82"  # Update with your port
         
         # EEG processor
         if EEG_AVAILABLE:
@@ -97,8 +103,8 @@ class BoothBackend:
                 return jsonify({'error': 'EEG processor not available'}), 400
                 
             if not self.eeg_streaming or len(self.recent_channel_data[0]) < 500:
-                return jsonify({'error': 'Insufficient EEG data for analysis'}), 400
-            
+                return jsonify({'error': 'Insufficient EEG data for analysis -> ' + str(len(self.recent_channel_data[0])) + ' samples available'}), 400
+
             try:
                 logger.info("🧠 Starting Big 5 personality analysis...")
                 
@@ -206,110 +212,191 @@ class BoothBackend:
             return jsonify({
                 'eeg_connected': self.eeg_streaming,
                 'clients_connected': len(self.eeg_clients),
-                'hardware_port': self.openbci_port,
+                'hardware_port': self.params.serial_port,
                 'processor_available': EEG_AVAILABLE
             })
     
     def connect_openbci_hardware(self):
-        """Connect to OpenBCI hardware"""
-        try:
-            logger.info("Connecting to OpenBCI hardware...")
-            self.eeg_serial = serial.Serial(self.openbci_port, self.openbci_baudrate, timeout=0.1)
-            time.sleep(2)
-
-            # Initialize OpenBCI
-            self.eeg_serial.write(b's')  # stop
-            time.sleep(0.5)
-            self.eeg_serial.reset_input_buffer()
-            self.eeg_serial.write(b'd')  # defaults
-            time.sleep(0.5)
-            self.eeg_serial.write(b'b')  # begin streaming
-
-            self.eeg_streaming = True
-            logger.info("✓ OpenBCI connected successfully")
-            return True
-
-        except Exception as e:
-            logger.error(f"❌ OpenBCI connection failed: {e}")
+        """Connect to OpenBCI hardware using BrainFlow with robust error handling"""
+        if not BRAINFLOW_AVAILABLE:
+            logger.error("❌ BrainFlow not available. Install brainflow package.")
             return False
-
-    def openbci_serial_reader(self):
-        """Read EEG data from OpenBCI in background thread"""
-        buffer = bytearray()
-        packet_count = 0
-
-        while self.eeg_streaming:
+        
+        # Set logging level to reduce BrainFlow noise
+        from brainflow.board_shim import LogLevels
+        BoardShim.set_log_level(LogLevels.LEVEL_WARN)
+        
+        max_retries = 3
+        
+        for attempt in range(max_retries):
             try:
-                if self.eeg_serial and self.eeg_serial.in_waiting:
-                    buffer.extend(self.eeg_serial.read(self.eeg_serial.in_waiting))
-
-                    while len(buffer) >= 33:
-                        # Find packet start (0xA0)
-                        start = buffer.index(0xA0) if 0xA0 in buffer else -1
-
-                        if start >= 0 and start + 32 < len(buffer):
-                            # Check for packet end (0xC0)
-                            if buffer[start + 32] == 0xC0:
-                                packet = buffer[start:start + 33]
-                                packet_count += 1
-
-                                # Parse 8 channels
-                                channels = []
-                                for i in range(8):
-                                    idx = 2 + (i * 3)
-                                    val = (packet[idx] << 16) | (packet[idx+1] << 8) | packet[idx+2]
-                                    if val & 0x800000:
-                                        val -= 0x1000000
-                                    channels.append(round(val * self.openbci_scale, 2))
-
-                                # Store recent data for frequency analysis
-                                for i, channel_val in enumerate(channels):
-                                    self.recent_channel_data[i].append(channel_val)
-                                    # Keep only last 2 seconds of data
-                                    if len(self.recent_channel_data[i]) > self.max_recent_samples:
-                                        self.recent_channel_data[i] = self.recent_channel_data[i][-self.max_recent_samples:]
-
-                                # Calculate frequency bands every 25 packets (10Hz update rate)
-                                frequency_bands = None
-                                if packet_count % 25 == 0 and self.eeg_processor and EEG_AVAILABLE:
-                                    try:
-                                        frequency_bands = self.eeg_processor.calculate_realtime_frequency_bands(self.recent_channel_data)
-                                    except Exception as e:
-                                        logger.debug(f"Frequency analysis error: {e}")
-
-                                # Create EEG data message
-                                eeg_data = {
-                                    'type': 'eeg',
-                                    'timestamp': time.time(),
-                                    'packet_num': packet_count,
-                                    'channels': channels,
-                                    'status': 'streaming',
-                                    'frequency_bands': frequency_bands
-                                }
-
-                                # Queue for WebSocket broadcast
-                                try:
-                                    self.eeg_data_queue.put_nowait(json.dumps(eeg_data))
-                                except queue.Full:
-                                    pass  # Drop data if queue is full
-
-                                # Log every 50 packets
-                                if packet_count % 50 == 0:
-                                    logger.info(f"EEG packet #{packet_count}: Ch1={channels[0]:.2f}μV")
-
-                                buffer = buffer[start + 33:]
-                            else:
-                                buffer = buffer[start + 1:]
-                        else:
-                            if len(buffer) > 100:
-                                buffer = buffer[-33:]
-                            break
-
-                time.sleep(0.001)
+                logger.info(f"🔌 Connecting to OpenBCI Cyton (attempt {attempt + 1}/{max_retries})...")
+                
+                # Create board shim
+                self.board_shim = BoardShim(self.board_id, self.params)
+                
+                # Prepare session
+                self.board_shim.prepare_session()
+                
+                logger.info("✅ Board prepared! Starting data stream...")
+                # Start data stream
+                self.board_shim.start_stream()
+                
+                # Wait longer for stream to stabilize (from robust_test.py)
+                logger.info("⏱️  Waiting for stream to stabilize...")
+                time.sleep(5)
+                
+                # Get channel info
+                eeg_channels = BoardShim.get_eeg_channels(self.board_id)
+                actual_sampling_rate = BoardShim.get_sampling_rate(self.board_id)
+                
+                # Check if we're actually getting data (from robust_test.py)
+                initial_count = self.board_shim.get_board_data_count()
+                time.sleep(1)
+                current_count = self.board_shim.get_board_data_count()
+                
+                if current_count > initial_count:
+                    logger.info(f"✅ Stream active! Data flowing at ~{current_count - initial_count} samples/sec")
+                    self.eeg_streaming = True
+                    self.sampling_rate = actual_sampling_rate  # Use actual sampling rate
+                    
+                    logger.info("✓ OpenBCI connected successfully via BrainFlow")
+                    logger.info(f"   Board ID: {self.board_id}")
+                    logger.info(f"   Sampling Rate: {self.sampling_rate} Hz")
+                    logger.info(f"   EEG Channels: {eeg_channels}")
+                    
+                    return True
+                else:
+                    logger.warning("⚠️  No data detected, retrying...")
+                    raise Exception("No data flow detected")
 
             except Exception as e:
-                logger.error(f"EEG serial error: {e}")
+                logger.error(f"❌ BrainFlow Error (attempt {attempt + 1}): {e}")
+                if self.board_shim:
+                    try:
+                        if self.board_shim.is_prepared():
+                            self.board_shim.stop_stream()
+                            self.board_shim.release_session()
+                    except:
+                        pass
+                    self.board_shim = None
+                
+                if attempt < max_retries - 1:
+                    logger.info(f"⏳ Waiting 3 seconds before retry...")
+                    time.sleep(3)
+        
+        logger.error("🔄 Hardware connection failed after all retries. Check:")
+        logger.error("  • OpenBCI board is powered on")
+        logger.error("  • USB cable is connected")
+        logger.error("  • Serial port is correct")
+        logger.error("  • No other software is using the device")
+        return False
+
+    def brainflow_data_reader(self):
+        """Read EEG data from OpenBCI using BrainFlow in background thread"""
+        packet_count = 0
+        
+        # Get EEG channel indices
+        eeg_channels = BoardShim.get_eeg_channels(self.board_id)
+        logger.info(f"EEG channels: {eeg_channels}")
+        
+        while self.eeg_streaming and self.board_shim:
+            try:
+                # Get new data from BrainFlow
+                data = self.board_shim.get_current_board_data(250)  # Get up to 250 samples (1 sec)
+                
+                if data.shape[1] > 0:  # If we have new data
+                    # Extract EEG channels (BrainFlow returns data in µV already)
+                    eeg_data = data[eeg_channels, :]
+                    
+                    # Process each sample
+                    for sample_idx in range(data.shape[1]):
+                        packet_count += 1
+                        
+                        # Get channel values for this sample (already in µV from BrainFlow)
+                        channels = []
+                        for ch_idx in range(len(eeg_channels)):
+                            value = eeg_data[ch_idx, sample_idx]
+                            channels.append(round(value, 2))
+                        
+                        # Pad to 8 channels if needed
+                        while len(channels) < 8:
+                            channels.append(0.0)
+                        channels = channels[:8]  # Ensure exactly 8 channels
+                        
+                        # Store recent data for frequency analysis
+                        for i, channel_val in enumerate(channels):
+                            self.recent_channel_data[i].append(channel_val)
+                            # Keep only last 2 seconds of data
+                            if len(self.recent_channel_data[i]) > self.max_recent_samples:
+                                self.recent_channel_data[i] = self.recent_channel_data[i][-self.max_recent_samples:]
+                        
+                        # Calculate frequency bands every 25 packets (10Hz update rate)
+                        frequency_bands = None
+                        if packet_count % 25 == 0 and self.eeg_processor and EEG_AVAILABLE:
+                            try:
+                                frequency_bands = self.eeg_processor.calculate_realtime_frequency_bands(self.recent_channel_data)
+                            except Exception as e:
+                                logger.debug(f"Frequency analysis error: {e}")
+                        
+                        # Create EEG data message
+                        eeg_data_msg = {
+                            'type': 'eeg',
+                            'timestamp': time.time(),
+                            'packet_num': packet_count,
+                            'channels': channels,
+                            'status': 'streaming',
+                            'frequency_bands': frequency_bands
+                        }
+                        
+                        # Queue for WebSocket broadcast
+                        try:
+                            self.eeg_data_queue.put_nowait(json.dumps(eeg_data_msg))
+                        except queue.Full:
+                            pass  # Drop data if queue is full
+                        
+                        # Enhanced logging with signal quality assessment (from robust_test.py)
+                        if packet_count % 250 == 0:
+                            # Signal quality assessment
+                            ch1_voltage = channels[0]
+                            if abs(ch1_voltage) > 200:
+                                status = "🔴 HIGH"
+                            elif abs(ch1_voltage) > 100:
+                                status = "🟡 MED" 
+                            elif abs(ch1_voltage) > 10:
+                                status = "🟢 OK"
+                            else:
+                                status = "🟣 LOW"
+                            
+                            logger.info(f"📊 BrainFlow packet #{packet_count}: Ch1={ch1_voltage:+8.1f}µV [{status}], Ch2={channels[1]:+8.1f}µV")
+                            
+                            if frequency_bands:
+                                # Enhanced frequency band reporting with mental state
+                                alpha_pct = frequency_bands.get('alpha', 0)
+                                beta_pct = frequency_bands.get('beta', 0)
+                                delta_pct = frequency_bands.get('delta', 0)
+                                
+                                # Simple mental state indicator (from robust_test.py)
+                                if alpha_pct > 40:
+                                    mental_state = "😌 Relaxed"
+                                elif beta_pct > 40:
+                                    mental_state = "🧠 Focused"
+                                elif delta_pct > 50:
+                                    mental_state = "😴 Drowsy"
+                                else:
+                                    mental_state = "🤔 Mixed"
+                                
+                                logger.info(f"   🧠 Freq bands: δ={delta_pct:.1f}% θ={frequency_bands.get('theta', 0):.1f}% α={alpha_pct:.1f}% β={beta_pct:.1f}%")
+                                logger.info(f"   Mental state: {mental_state}")
+                
+                # Sleep briefly to avoid overwhelming the CPU
+                time.sleep(0.01)  # 10ms sleep = max 100Hz processing
+                
+            except Exception as e:
+                logger.error(f"BrainFlow data reading error: {e}")
                 break
+        
+        logger.info("BrainFlow data reader thread ended")
 
     async def eeg_websocket_handler(self, websocket, path):
         """Handle EEG WebSocket connections from frontend"""
@@ -438,7 +525,7 @@ class BoothBackend:
         if not self.eeg_streaming:
             if self.connect_openbci_hardware():
                 # Start serial reader thread
-                serial_thread = threading.Thread(target=self.openbci_serial_reader, daemon=True)
+                serial_thread = threading.Thread(target=self.brainflow_data_reader, daemon=True)
                 serial_thread.start()
                 logger.info("EEG hardware streaming started")
             else:
@@ -448,12 +535,14 @@ class BoothBackend:
         """Stop EEG hardware when user disconnects"""
         if self.eeg_streaming:
             self.eeg_streaming = False
-            if self.eeg_serial:
+            if self.board_shim:
                 try:
-                    self.eeg_serial.close()
-                except:
-                    pass
-                self.eeg_serial = None
+                    self.board_shim.stop_stream()
+                    self.board_shim.release_session()
+                    logger.info("✓ BrainFlow session released")
+                except Exception as e:
+                    logger.warning(f"Warning during BrainFlow cleanup: {e}")
+                self.board_shim = None
             logger.info("EEG hardware stopped")
     
     async def connect_to_relayer(self):

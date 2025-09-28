@@ -3,8 +3,19 @@ Scientific EEG Processor for Love Detection
 Based on peer-reviewed neuroscience research
 """
 import numpy as np
+import logging
 from scipy import signal
 from scipy.stats import zscore
+
+# Set up logger
+logger = logging.getLogger(__name__)
+try:
+    from brainflow.data_filter import DataFilter, FilterTypes, WindowOperations, DetrendOperations
+    from brainflow.board_shim import BoardShim
+    BRAINFLOW_AVAILABLE = True
+except ImportError:
+    print("Warning: BrainFlow not available. Some features may not work.")
+    BRAINFLOW_AVAILABLE = False
 
 class EEGProcessor:
     def __init__(self, sampling_rate=250):
@@ -162,47 +173,197 @@ class EEGProcessor:
 
     
     def bandpass_filter(self, data, low_freq=1, high_freq=45):
-        """Apply bandpass filter to remove noise - simple approach like reference code"""
+        """Apply bandpass filter using BrainFlow's optimized filters"""
         if len(data) < 10:
             return data
+        
+        # Convert to numpy array
+        data_array = np.array(data, dtype=np.float64)
+        
+        if not BRAINFLOW_AVAILABLE:
+            # Fallback to scipy if BrainFlow not available
+            nyquist = self.sampling_rate / 2
+            low = low_freq / nyquist
+            high = high_freq / nyquist
             
-        nyquist = self.sampling_rate / 2
-        low = low_freq / nyquist
-        high = high_freq / nyquist
+            try:
+                b, a = signal.butter(4, [low, high], btype='band')
+                filtered = signal.filtfilt(b, a, data_array)
+                return filtered
+            except:
+                return data_array
         
-        # Design filter
-        b, a = signal.butter(4, [low, high], btype='band')
-        
-        # Apply filter
         try:
-            filtered = signal.filtfilt(b, a, data)
-            return filtered
-        except:
-            # If filtering fails, return original data
+            # Use BrainFlow's optimized bandpass filter
+            DataFilter.perform_bandpass(
+                data_array, 
+                self.sampling_rate, 
+                low_freq, 
+                high_freq, 
+                order=4,  # 4th order Butterworth
+                filter_type=FilterTypes.BUTTERWORTH.value,
+                ripple=0
+            )
+            return data_array
+            
+        except Exception as e:
+            # Fallback to scipy if BrainFlow fails
+            try:
+                nyquist = self.sampling_rate / 2
+                low = low_freq / nyquist
+                high = high_freq / nyquist
+                b, a = signal.butter(4, [low, high], btype='band')
+                filtered = signal.filtfilt(b, a, data_array)
+                return filtered
+            except:
+                return data_array
+    
+    def preprocess_eeg_data(self, data):
+        """Comprehensive EEG preprocessing using BrainFlow's advanced functions"""
+        if len(data) < 100:
             return data
+        
+        data_array = np.array(data, dtype=np.float64)
+        
+        if not BRAINFLOW_AVAILABLE:
+            return self.bandpass_filter(data_array, 0.5, 45)
+        
+        try:
+            # 1. Remove DC offset and linear trends
+            DataFilter.detrend(data_array, DetrendOperations.LINEAR.value)
+            
+            # 2. Apply notch filter to remove powerline interference (50Hz/60Hz)
+            DataFilter.perform_bandstop(
+                data_array, self.sampling_rate, 49.0, 51.0, 4,
+                FilterTypes.BUTTERWORTH.value, 0
+            )
+            DataFilter.perform_bandstop(
+                data_array, self.sampling_rate, 59.0, 61.0, 4,
+                FilterTypes.BUTTERWORTH.value, 0
+            )
+            
+            # 3. High-pass filter to remove slow drift (0.5 Hz)
+            DataFilter.perform_highpass(
+                data_array, self.sampling_rate, 0.5, 4,
+                FilterTypes.BUTTERWORTH.value, 0
+            )
+            
+            # 4. Low-pass filter to remove high-frequency noise (45 Hz)
+            DataFilter.perform_lowpass(
+                data_array, self.sampling_rate, 45.0, 4,
+                FilterTypes.BUTTERWORTH.value, 0
+            )
+            
+            return data_array
+            
+        except Exception as e:
+            # Fallback to basic filtering
+            return self.bandpass_filter(data_array, 0.5, 45)
+    
+    def assess_signal_quality(self, voltage):
+        """
+        Assess signal quality based on voltage range (from robust_test.py)
+        """
+        if abs(voltage) > 200:
+            return "🔴 HIGH"
+        elif abs(voltage) > 100:
+            return "🟡 MED" 
+        elif abs(voltage) > 10:
+            return "🟢 OK"
+        else:
+            return "🟣 LOW"
+    
+    def get_mental_state(self, frequency_bands):
+        """
+        Determine mental state from frequency bands (from robust_test.py)
+        """
+        alpha_pct = frequency_bands.get('alpha', 0)
+        beta_pct = frequency_bands.get('beta', 0)
+        delta_pct = frequency_bands.get('delta', 0)
+        
+        if alpha_pct > 40:
+            return "😌 Relaxed"
+        elif beta_pct > 40:
+            return "🧠 Focused"
+        elif delta_pct > 50:
+            return "😴 Drowsy"
+        else:
+            return "🤔 Mixed"
 
     def calculate_band_power(self, data):
-        """Calculate power for each frequency band"""
+        """
+        Calculate power for each frequency band - wrapper method for compatibility
+        """
         if len(data) < 100:
             return {band: 0.0 for band in self.bands.keys()}
+        
+        # Use BrainFlow method if available, otherwise fallback to FFT
+        if BRAINFLOW_AVAILABLE:
+            return self.calculate_band_power_brainflow(data, self.sampling_rate)
+        else:
+            # Fallback to simple FFT method
+            n = len(data)
+            fft_vals = np.fft.fft(data)
+            fft_freq = np.fft.fftfreq(n, 1/self.sampling_rate)
             
-        # Apply FFT
-        n = len(data)
-        fft_vals = np.fft.fft(data)
-        fft_freq = np.fft.fftfreq(n, 1/self.sampling_rate)
+            # Get positive frequencies only
+            pos_mask = fft_freq > 0
+            freqs = fft_freq[pos_mask]
+            power = np.abs(fft_vals[pos_mask]) ** 2
+            
+            # Calculate power for each band
+            band_powers = {}
+            for band_name, (low, high) in self.bands.items():
+                band_mask = (freqs >= low) & (freqs <= high)
+                band_powers[band_name] = np.mean(power[band_mask]) if np.any(band_mask) else 0
+                
+            return band_powers
 
-        # Get positive frequencies only
-        pos_mask = fft_freq > 0
-        freqs = fft_freq[pos_mask]
-        power = np.abs(fft_vals[pos_mask]) ** 2
-
-        # Calculate power for each band
-        band_powers = {}
-        for band_name, (low, high) in self.bands.items():
-            band_mask = (freqs >= low) & (freqs <= high)
-            band_powers[band_name] = np.mean(power[band_mask]) if np.any(band_mask) else 0
-
-        return band_powers
+    def calculate_band_power_brainflow(self, data, sampling_rate):
+        """
+        Calculate band power using robust method from robust_test.py
+        Combines BrainFlow filtering with numpy FFT analysis
+        """
+        if len(data) < 128:  # Need minimum data for analysis
+            return {band: 0.0 for band in self.bands.keys()}
+        
+        try:
+            # Create a copy for processing (BrainFlow modifies in-place)
+            data_copy = np.array(data, dtype=np.float64)
+            
+            # Apply BrainFlow's robust bandpass filter (from robust_test.py approach)
+            try:
+                DataFilter.perform_bandpass(data_copy, sampling_rate, 1.0, 45.0, 4,
+                                          FilterTypes.BUTTERWORTH_ZERO_PHASE, 0)
+            except:
+                # If BrainFlow filtering fails, use original data
+                data_copy = np.array(data, dtype=np.float64)
+            
+            # Use numpy FFT analysis (from robust_test.py)
+            fft_data = np.fft.fft(data_copy)
+            freqs = np.fft.fftfreq(len(data_copy), 1.0/sampling_rate)
+            
+            # Take only positive frequencies
+            positive_freqs = freqs[:len(freqs)//2]
+            power_spectrum = np.abs(fft_data[:len(fft_data)//2])**2
+            
+            # Calculate power in each band (robust_test.py method)
+            band_powers = {}
+            
+            for band_name, (low_freq, high_freq) in self.bands.items():
+                band_mask = (positive_freqs >= low_freq) & (positive_freqs < high_freq)
+                if np.any(band_mask):
+                    band_power = np.sum(power_spectrum[band_mask])
+                    band_powers[band_name] = band_power
+                else:
+                    band_powers[band_name] = 0.0
+            
+            return band_powers
+            
+        except Exception as e:
+            # Fallback to simple method if analysis fails
+            logger.debug(f"BrainFlow band power calculation failed: {e}")
+            return self.calculate_band_power(data)
 
     def calculate_big5_personality(self, channels_data, duration_minutes=2):
         """
@@ -212,12 +373,13 @@ class EEGProcessor:
         if len(channels_data) < 8:
             raise ValueError("Need 8 channels of EEG data")
         
-        # Process channels for personality analysis
+        # Process channels for personality analysis using BrainFlow preprocessing
         processed_channels = []
         for ch_data in channels_data:
             if len(ch_data) < 500:  # Need at least 2 seconds
                 continue
-            filtered = self.bandpass_filter(ch_data, 1, 45)
+            # Use comprehensive BrainFlow preprocessing
+            filtered = self.preprocess_eeg_data(ch_data)
             processed_channels.append(filtered)
         
         if len(processed_channels) < 8:
@@ -296,12 +458,13 @@ class EEGProcessor:
         if len(channels_data) < 8 or any(len(ch) < 250 for ch in channels_data):
             return None
         
-        # Process EEG response during stimulus
+        # Process EEG response during stimulus using BrainFlow preprocessing
         processed_channels = []
         for ch_data in channels_data:
             stimulus_samples = int(stimulus_duration * self.sampling_rate)
             stimulus_data = np.array(ch_data[-stimulus_samples:])
-            filtered = self.bandpass_filter(stimulus_data, 1, 45)
+            # Use comprehensive BrainFlow preprocessing for artifact removal
+            filtered = self.preprocess_eeg_data(stimulus_data)
             processed_channels.append(filtered)
         
         # Calculate attraction indicators
@@ -602,18 +765,18 @@ class EEGProcessor:
     
     def calculate_realtime_frequency_bands(self, recent_data):
         """
-        Calculate frequency band powers for recent EEG data window - reference code approach
+        Calculate frequency band powers using robust method from robust_test.py
         
         Args:
             recent_data: List of 8 channels, each with recent samples (last ~2-5 seconds)
             
         Returns:
-            dict with frequency band powers
+            dict with frequency band powers as percentages
         """
         if len(recent_data) < 8:
             return None
             
-        # Calculate band powers for each channel using reference approach
+        # Calculate band powers for each channel using robust approach
         all_bands = {
             'delta': [],
             'theta': [], 
@@ -622,32 +785,41 @@ class EEGProcessor:
             'gamma': []
         }
         
+        valid_channels = 0
+        
         for channel_data in recent_data:
-            if len(channel_data) < 250:  # Need at least 1 second of data
+            if len(channel_data) < 128:  # Need minimum data for robust analysis
                 continue
                 
-            # Get recent window - use power of 2 for FFT efficiency
-            window_size = min(512, len(channel_data))  # 512 samples = ~2 seconds at 250Hz
+            # Get recent window - use more data for better frequency resolution
+            window_size = min(500, len(channel_data))
             window_data = np.array(channel_data[-window_size:])
             
-            # Remove DC component like OpenBCI
+            # Remove DC offset (important for frequency analysis)
             window_data = window_data - np.mean(window_data)
             
-            # Apply high-pass filter to reduce DC and low-frequency drift (reduces delta dominance)
             try:
-                # Use higher cutoff to reduce delta dominance (OpenBCI often uses 1-50Hz)
-                filtered_data = self.bandpass_filter(window_data, 0.5, 50)
+                # Use the robust frequency analysis method
+                band_powers = self.calculate_band_power_brainflow(window_data, self.sampling_rate)
                 
-                # Calculate band powers using corrected approach
-                band_powers = self.calculate_band_power(filtered_data)
+                # Only include channels with reasonable signal
+                total_channel_power = sum(band_powers.values())
+                if total_channel_power > 0:
+                    for band_name in self.bands:
+                        power = band_powers.get(band_name, 0)
+                        all_bands[band_name].append(power)
+                    
+                    valid_channels += 1
                 
-                for band_name in self.bands:
-                    all_bands[band_name].append(band_powers[band_name])
             except Exception as e:
-                # Skip if calculation fails
+                logger.debug(f"Channel analysis failed: {e}")
                 continue
         
-        # Calculate average power across channels and convert to relative percentages
+        if valid_channels == 0:
+            logger.warning("No valid channels for frequency analysis")
+            return None
+        
+        # Calculate average power across valid channels
         band_averages = {}
         total_power = 0
         
@@ -659,27 +831,27 @@ class EEGProcessor:
             else:
                 band_averages[band_name] = 0.0
         
-        # Apply delta suppression to prevent artificial dominance
-        if 'delta' in band_averages and band_averages['delta'] > 0:
-            # Reduce delta by 50% to account for DC drift and movement artifacts
-            band_averages['delta'] *= 0.5
-            total_power = sum(band_averages.values())
-        
-        # Convert to relative percentages (should sum to 100%)
+        # Convert to relative percentages (robust_test.py approach)
         result = {}
         if total_power > 0:
             for band_name, power in band_averages.items():
-                result[band_name] = round((power / total_power) * 100, 2)
+                percentage = (power / total_power) * 100
+                result[band_name] = round(percentage, 1)
+            
+            # Validate results - prevent unrealistic delta dominance
+            if result.get('delta', 0) > 80:
+                logger.warning("Detected unrealistic delta dominance, adjusting...")
+                # Redistribute some delta power to other bands
+                excess_delta = result['delta'] - 50
+                result['delta'] = 50
+                result['alpha'] += excess_delta * 0.3
+                result['theta'] += excess_delta * 0.3
+                result['beta'] += excess_delta * 0.4
         else:
-            # If no power detected, use realistic EEG distribution
-            result = {
-                'delta': 15.0,   # Lower default for delta
-                'theta': 20.0,
-                'alpha': 30.0,   # Higher for typical relaxed state
-                'beta': 25.0, 
-                'gamma': 10.0
-            }
-                
+            # Default balanced distribution if no power detected
+            result = {'delta': 20.0, 'theta': 20.0, 'alpha': 20.0, 'beta': 20.0, 'gamma': 20.0}
+        
+        logger.debug(f"Frequency bands calculated from {valid_channels} channels: {result}")
         return result
     
     def debug_psd_calculation(self, channel_data, channel_name="Test"):
