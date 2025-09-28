@@ -226,44 +226,58 @@ class EEGProcessor:
         # Calculate personality indicators
         personality_scores = {}
         
-        # 1. OPENNESS - Alpha in parietal/occipital regions (creativity, imagination)
-        parietal_occipital_alpha = 0
-        for i in [4, 5, 6, 7]:  # P7, P8, O1, O2
-            alpha_power = self.get_band_power(processed_channels[i], 'alpha')
-            parietal_occipital_alpha += alpha_power
-        parietal_occipital_alpha /= 4
-        openness = min(100, max(0, (np.log(parietal_occipital_alpha + 1) * 20)))
+        # Calculate total power across all bands for normalization
+        total_powers = []
+        all_band_powers = {'delta': [], 'theta': [], 'alpha': [], 'beta': [], 'gamma': []}
         
-        # 2. CONSCIENTIOUSNESS - Beta activity in frontal regions (focus, organization)
-        frontal_beta = 0
-        for i in [0, 1]:  # Fp1, Fp2
-            beta_power = self.get_band_power(processed_channels[i], 'beta')
-            frontal_beta += beta_power
-        frontal_beta /= 2
-        conscientiousness = min(100, max(0, (np.log(frontal_beta + 1) * 25)))
+        for ch_data in processed_channels:
+            band_powers = self.calculate_band_power(ch_data)
+            total_power = sum(band_powers.values())
+            if total_power > 0:
+                total_powers.append(total_power)
+                for band_name, power in band_powers.items():
+                    all_band_powers[band_name].append(power / total_power)  # Normalize by total power
         
-        # 3. EXTRAVERSION - Frontal Alpha Asymmetry (approach vs withdrawal)
+        if not total_powers:
+            return None
+        
+        # Calculate average relative powers across all channels
+        avg_band_powers = {}
+        for band_name, powers in all_band_powers.items():
+            avg_band_powers[band_name] = np.mean(powers) if powers else 0
+        
+        # 1. OPENNESS - Alpha activity relative to other bands (creativity, divergent thinking)
+        # Higher relative alpha = more openness (relaxed, creative state)
+        alpha_ratio = avg_band_powers['alpha'] / (avg_band_powers['beta'] + 0.01)  # Alpha/Beta ratio
+        openness = min(100, max(0, 30 + (alpha_ratio * 40)))  # Base 30%, up to 70% more
+        
+        # 2. CONSCIENTIOUSNESS - Beta activity (focus, attention, self-control)
+        # Higher relative beta = more conscientiousness
+        beta_dominance = avg_band_powers['beta'] - avg_band_powers['theta']  # Beta minus theta
+        conscientiousness = min(100, max(0, 40 + (beta_dominance * 300)))  # Base 40%
+        
+        # 3. EXTRAVERSION - Frontal Alpha Asymmetry (social approach vs withdrawal)
         faa = self.calculate_frontal_alpha_asymmetry(
             processed_channels[0],  # Fp1 (left)
             processed_channels[1]   # Fp2 (right)
         )
-        extraversion = min(100, max(0, 50 + (faa * 100)))  # Positive FAA = extraversion
+        # FAA is typically between -1 and 1, convert to 0-100 scale
+        extraversion = min(100, max(0, 50 + (faa * 25)))  # Center at 50%, ±25%
         
-        # 4. AGREEABLENESS - Theta activity (emotional processing, empathy)
-        avg_theta = 0
-        for ch_data in processed_channels:
-            theta_power = self.get_band_power(ch_data, 'theta')
-            avg_theta += theta_power
-        avg_theta /= len(processed_channels)
-        agreeableness = min(100, max(0, (np.log(avg_theta + 1) * 30)))
+        # 4. AGREEABLENESS - Theta activity (empathy, emotional processing)
+        # Moderate theta (not too high, not too low) indicates balanced emotional processing
+        theta_optimal = 0.25  # Optimal theta ratio (25% of total power)
+        theta_deviation = abs(avg_band_powers['theta'] - theta_optimal)
+        agreeableness = min(100, max(20, 70 - (theta_deviation * 200)))  # High agreeableness with balanced theta
         
-        # 5. NEUROTICISM - High frequency activity and asymmetry
-        avg_gamma = 0
-        for ch_data in processed_channels:
-            gamma_power = self.get_band_power(ch_data, 'gamma')
-            avg_gamma += gamma_power
-        avg_gamma /= len(processed_channels)
-        neuroticism = min(100, max(0, (np.log(avg_gamma + 1) * 35)))
+        # 5. NEUROTICISM - Gamma activity and overall variability (anxiety, emotional instability)
+        # Higher gamma often indicates anxiety/stress
+        gamma_ratio = avg_band_powers['gamma']
+        # Also consider power variability across channels as stress indicator
+        power_variability = np.std(total_powers) / (np.mean(total_powers) + 0.01)
+        neuroticism_gamma = gamma_ratio * 200  # Gamma contribution
+        neuroticism_variability = power_variability * 50  # Variability contribution
+        neuroticism = min(100, max(0, neuroticism_gamma + neuroticism_variability))
         
         personality_scores = {
             'openness': round(openness, 1),
@@ -282,11 +296,23 @@ class EEGProcessor:
             'neuroticism': self._get_neuroticism_description(neuroticism)
         }
         
+        # Add debug information to understand the calculations
+        debug_info = {
+            'avg_band_powers': avg_band_powers,
+            'alpha_ratio': round(alpha_ratio, 3),
+            'beta_dominance': round(beta_dominance, 3),
+            'faa': round(faa, 3),
+            'theta_deviation': round(theta_deviation, 3),
+            'gamma_ratio': round(gamma_ratio, 3),
+            'power_variability': round(power_variability, 3)
+        }
+        
         return {
             'scores': personality_scores,
             'descriptions': descriptions,
             'analysis_duration': duration_minutes,
-            'confidence': self._calculate_personality_confidence(processed_channels)
+            'confidence': self._calculate_personality_confidence(processed_channels),
+            'debug': debug_info  # Remove this in production
         }
     
     def analyze_dating_preference(self, channels_data, stimulus_type, stimulus_duration=3):
@@ -759,6 +785,51 @@ class EEGProcessor:
         else:
             return "Highly emotionally stable and calm. Rarely experiences negative emotions or stress."
     
+    def test_personality_calculation(self, channels_data):
+        """
+        Test method to debug personality calculation step by step
+        """
+        print("=== Personality Calculation Debug ===")
+        
+        # Process channels
+        processed_channels = []
+        for i, ch_data in enumerate(channels_data[:8]):
+            if len(ch_data) < 500:
+                print(f"Channel {i+1}: Insufficient data ({len(ch_data)} samples)")
+                continue
+            filtered = self.bandpass_filter(ch_data, 1, 45)
+            processed_channels.append(filtered)
+            print(f"Channel {i+1}: {len(filtered)} samples, std={np.std(filtered):.3f}µV")
+        
+        if len(processed_channels) < 8:
+            print(f"Error: Only {len(processed_channels)} valid channels")
+            return None
+        
+        # Calculate band powers for each channel
+        print("\n--- Band Powers by Channel ---")
+        for i, ch_data in enumerate(processed_channels):
+            band_powers = self.calculate_band_power(ch_data)
+            total = sum(band_powers.values())
+            print(f"Channel {i+1}: Total={total:.6f}")
+            for band, power in band_powers.items():
+                rel_power = (power/total*100) if total > 0 else 0
+                print(f"  {band}: {power:.6f} ({rel_power:.1f}%)")
+        
+        # Now run the actual personality calculation
+        result = self.calculate_big5_personality(channels_data, duration_minutes=2)
+        
+        if result and 'debug' in result:
+            print("\n--- Personality Debug Values ---")
+            debug = result['debug']
+            for key, value in debug.items():
+                print(f"{key}: {value}")
+                
+            print("\n--- Final Personality Scores ---")
+            for trait, score in result['scores'].items():
+                print(f"{trait}: {score}%")
+        
+        return result
+    
     def _calculate_personality_confidence(self, processed_channels):
         """Calculate confidence level based on signal quality and consistency"""
         if not processed_channels:
@@ -768,7 +839,7 @@ class EEGProcessor:
         signal_quality = 0
         for ch_data in processed_channels:
             # Check for reasonable amplitude range
-            if 1 < np.std(ch_data) < 100:
+            if 0.1 < np.std(ch_data) < 100:  # More lenient range
                 signal_quality += 1
                 
         confidence = min(100, (signal_quality / len(processed_channels)) * 100)

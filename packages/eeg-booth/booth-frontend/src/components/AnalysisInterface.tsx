@@ -62,7 +62,7 @@ const AnalysisInterface: React.FC<AnalysisInterfaceProps> = ({ isConnected }) =>
   const sendResultsToScanner = async (personalityData: PersonalityResult, datingData: DatingPreference[]) => {
     try {
       // Send results to scanner frontend via booth backend
-      const response = await fetch('http://localhost:5000/send-analysis-results', {
+      const response = await fetch('http://localhost:3004/send-analysis-results', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -110,7 +110,7 @@ const AnalysisInterface: React.FC<AnalysisInterfaceProps> = ({ isConnected }) =>
       await new Promise(resolve => setTimeout(resolve, 2000));
 
       // Call personality analysis API
-      const personalityResponse = await fetch('http://localhost:5000/analyze-personality', {
+      const personalityResponse = await fetch('http://localhost:3004/analyze-personality', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -144,7 +144,7 @@ const AnalysisInterface: React.FC<AnalysisInterfaceProps> = ({ isConnected }) =>
         setShowingStimulus(false);
 
         // Analyze EEG response
-        const response = await fetch('http://localhost:5000/analyze-dating-preference', {
+        const response = await fetch('http://localhost:3004/analyze-dating-preference', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
